@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""Endless Matrix digital rain for the terminal.
+
+Usage: matrix-rain [--screensaver]
+
+Any key (or mouse movement) exits. With --screensaver it also exits when the
+window loses focus and restores the Hyprland cursor, matching the stock
+Omarchy screensaver behaviour.
+
+Environment:
+  MATRIX_COLOR  base rain color as hex (default 00ff41)
+  MATRIX_FPS    frames per second (default 30)
+"""
+
+import os
+import random
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import termios
+import time
+import tty
+
+GLYPHS = (
+    "ｦｱｳｴｵｶｷｹｺｻｼｽｾｿﾀﾂﾃﾅﾆﾇﾈﾊﾋﾎﾏﾐﾑﾒﾓﾔﾕﾗﾘﾜ"
+    "ｦｱｳｴｵｶｷｹｺｻｼｽｾｿﾀﾂﾃﾅﾆﾇﾈﾊﾋﾎﾏﾐﾑﾒﾓﾔﾕﾗﾘﾜ"
+    "0123456789Z:.\"=*+-<>¦|_"
+)
+FADE_STEPS = 16
+
+
+def parse_hex(value, fallback):
+    try:
+        value = value.lstrip("#")
+        return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+    except (ValueError, AttributeError, IndexError):
+        return fallback
+
+
+def build_palette(base):
+    """Index 0 is the white-hot head; the rest fade from bright to near-black."""
+    head = "\x1b[1;38;2;230;255;230m"
+    steps = []
+    for i in range(FADE_STEPS):
+        t = 1.0 - i / FADE_STEPS
+        t = t ** 1.6
+        r, g, b = (int(c * t) for c in base)
+        steps.append(f"\x1b[22;38;2;{r};{g};{b}m")
+    return [head] + steps
+
+
+class Drop:
+    __slots__ = ("y", "speed", "trail", "tick")
+
+    def __init__(self, height):
+        self.y = -1
+        # Frames per row: higher is slower.
+        self.speed = random.choice((2, 3, 3, 4, 5, 6))
+        self.trail = random.randint(max(6, height // 4), max(10, height))
+        self.tick = 0
+
+
+class Rain:
+    def __init__(self, palette):
+        self.palette = palette
+        self.resize()
+
+    def resize(self):
+        self.width, self.height = shutil.get_terminal_size((80, 24))
+        # cell index -> [age, life, glyph, palette_index]
+        self.lit = {}
+        self.columns = [[] for _ in range(self.width)]
+        self.out = ["\x1b[0m\x1b[2J"]
+
+    def step(self):
+        w, h = self.width, self.height
+        lit = self.lit
+        out = self.out
+        palette = self.palette
+        last = len(palette) - 1
+
+        # Spawn new drops; keep density roughly constant regardless of size.
+        for x, drops in enumerate(self.columns):
+            if (not drops or drops[-1].y > h // 3) and random.random() < 0.012:
+                drops.append(Drop(h))
+
+        # Advance drops, lighting the cell under each new head.
+        for x, drops in enumerate(self.columns):
+            for drop in drops:
+                drop.tick += 1
+                if drop.tick < drop.speed:
+                    continue
+                drop.tick = 0
+                drop.y += 1
+                if drop.y < h:
+                    lit[drop.y * w + x] = [-1, drop.trail * drop.speed, random.choice(GLYPHS), -1]
+            if drops and drops[0].y >= h:
+                drops[:] = [d for d in drops if d.y < h]
+
+        # Age every lit cell and redraw only what changed.
+        dead = []
+        for idx, cell in lit.items():
+            cell[0] += 1
+            age, life = cell[0], cell[1]
+            if age > life:
+                dead.append(idx)
+                out.append(f"\x1b[{idx // w + 1};{idx % w + 1}H ")
+                continue
+            ci = 0 if age == 0 else 1 + (age - 1) * (last - 1) // life
+            glitch = age > 0 and random.random() < 0.02
+            if glitch:
+                cell[2] = random.choice(GLYPHS)
+            if ci != cell[3] or glitch:
+                cell[3] = ci
+                out.append(f"\x1b[{idx // w + 1};{idx % w + 1}H{palette[ci]}{cell[2]}")
+        for idx in dead:
+            del lit[idx]
+
+    def flush(self):
+        if self.out:
+            data = "".join(self.out)
+            self.out = []
+            os.write(sys.stdout.fileno(), data.encode())
+
+
+def screensaver_in_focus():
+    try:
+        result = subprocess.run(
+            ["hyprctl", "activewindow", "-j"],
+            capture_output=True, text=True, timeout=1,
+        )
+        return '"org.omarchy.screensaver"' in result.stdout
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
+def set_hypr_cursor_invisible(invisible):
+    value = "true" if invisible else "false"
+    for cmd in (
+        ["hyprctl", "eval", f"hl.config({{ cursor = {{ invisible = {value} }} }})"],
+        ["hyprctl", "keyword", "cursor:invisible", value],
+    ):
+        try:
+            if subprocess.run(cmd, capture_output=True, timeout=2).returncode == 0:
+                return
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def wait_for_terminal_resize():
+    # Terminals start at 80x24 and resize once the compositor sizes the window.
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and shutil.get_terminal_size() == (80, 24):
+        time.sleep(0.02)
+
+
+def main():
+    screensaver = "--screensaver" in sys.argv[1:]
+    palette = build_palette(parse_hex(os.environ.get("MATRIX_COLOR"), (0, 255, 65)))
+    try:
+        fps = max(5, min(120, int(os.environ.get("MATRIX_FPS", "30"))))
+    except ValueError:
+        fps = 30
+    frame = 1.0 / fps
+
+    stdin = sys.stdin.fileno()
+    saved_tty = termios.tcgetattr(stdin) if os.isatty(stdin) else None
+
+    def restore(*_):
+        os.write(sys.stdout.fileno(), b"\x1b[?1003l\x1b[?1000l\x1b[0m\x1b[2J\x1b[H\x1b[?25h\x1b[?1049l")
+        if saved_tty:
+            termios.tcsetattr(stdin, termios.TCSADRAIN, saved_tty)
+        if screensaver:
+            set_hypr_cursor_invisible(False)
+            # Close the screensaver on every monitor, not just this one.
+            subprocess.run(["pkill", "-f", "[o]rg.omarchy.screensaver"], capture_output=True)
+        os._exit(0)
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+        signal.signal(sig, restore)
+
+    if screensaver:
+        os.write(sys.stdout.fileno(), b"\x1b]11;rgb:00/00/00\x07")
+        set_hypr_cursor_invisible(True)
+        wait_for_terminal_resize()
+
+    if saved_tty:
+        tty.setcbreak(stdin)
+    # Alternate screen, hide cursor, report any mouse motion so it wakes us.
+    os.write(sys.stdout.fileno(), b"\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1003h")
+
+    rain = Rain(palette)
+    resized = []
+    signal.signal(signal.SIGWINCH, lambda *_: resized.append(True))
+
+    # Ignore input that arrives while the window is still settling in.
+    grace_until = time.monotonic() + 1.0
+    next_focus_check = time.monotonic() + 2.0
+    next_frame = time.monotonic()
+
+    while True:
+        if resized:
+            resized.clear()
+            rain.resize()
+        rain.step()
+        rain.flush()
+
+        next_frame += frame
+        now = time.monotonic()
+        timeout = max(0.0, next_frame - now)
+        if now - next_frame > 0.5:
+            next_frame = now  # fell behind; don't try to catch up
+
+        try:
+            ready, _, _ = select.select([stdin], [], [], timeout)
+        except InterruptedError:
+            ready = []
+        if ready:
+            data = os.read(stdin, 1024)
+            if not data or time.monotonic() > grace_until:
+                restore()
+
+        if screensaver and time.monotonic() > next_focus_check:
+            next_focus_check = time.monotonic() + 1.0
+            if not screensaver_in_focus():
+                restore()
+
+
+if __name__ == "__main__":
+    main()

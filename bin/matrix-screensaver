@@ -1,0 +1,59 @@
+#!/bin/bash
+
+# Launch the Matrix rain screensaver fullscreen on every monitor.
+# Mirrors omarchy-launch-screensaver, but runs matrix-rain instead of ttfx.
+# Usage: matrix-screensaver [force]
+
+RAIN="$HOME/.local/bin/matrix-rain --screensaver"
+
+# Exit early if a screensaver is already running
+pgrep -f '[o]rg.omarchy.screensaver' >/dev/null && exit 0
+
+# Respect the Omarchy screensaver toggle unless forced
+if omarchy-toggle-enabled screensaver-off && [[ $1 != "force" ]]; then
+  exit 1
+fi
+
+focused=$(omarchy-hyprland-monitor-focused)
+terminal=$(xdg-terminal-exec --print-id)
+
+hypr_focus_monitor() {
+  hyprctl dispatch "hl.dsp.focus({ monitor = \"$1\" })" >/dev/null 2>&1 || hyprctl dispatch focusmonitor "$1" >/dev/null
+}
+
+hypr_exec() {
+  hyprctl dispatch "hl.dsp.exec_cmd([[$*]])" >/dev/null 2>&1 || hyprctl dispatch exec -- bash -lc "$*" >/dev/null
+}
+
+SOCKET="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
+exec {events}< <(socat -U - "UNIX-CONNECT:$SOCKET")
+
+wait_for_screensaver_window() {
+  local line deadline=$((SECONDS + 5))
+  while ((SECONDS < deadline)) && IFS= read -r -t $((deadline - SECONDS)) -u "$events" line; do
+    [[ $line == openwindow\>\>*,org.omarchy.screensaver,* ]] && return 0
+  done
+}
+
+for m in $(hyprctl monitors -j | jq -r '.[] | .name'); do
+  hypr_focus_monitor "$m"
+
+  case $terminal in
+  *Alacritty*)
+    hypr_exec alacritty --class=org.omarchy.screensaver --config-file "$OMARCHY_PATH/default/alacritty/screensaver.toml" -e $RAIN
+    ;;
+  *ghostty*)
+    hypr_exec ghostty --class=org.omarchy.screensaver --config-file="$OMARCHY_PATH/default/ghostty/screensaver" --font-size=18 -e $RAIN
+    ;;
+  *kitty*)
+    hypr_exec kitty --class=org.omarchy.screensaver --override font_size=18 --override window_padding_width=0 -e $RAIN
+    ;;
+  *)
+    hypr_exec foot --app-id=org.omarchy.screensaver --config="$OMARCHY_PATH/default/foot/screensaver.ini" -e $RAIN
+    ;;
+  esac
+
+  wait_for_screensaver_window
+done
+
+hypr_focus_monitor "$focused"
