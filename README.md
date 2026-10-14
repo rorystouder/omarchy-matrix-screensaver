@@ -9,7 +9,7 @@ Matrix-style digital rain as the [Omarchy](https://omarchy.org) idle screensaver
 ## Install
 
 ```bash
-git clone <this-repo> ~/omarchy-matrix-screensaver
+git clone https://github.com/rorystouder/omarchy-matrix-screensaver.git ~/omarchy-matrix-screensaver
 cd ~/omarchy-matrix-screensaver
 ./install.sh                          # screensaver at 1200s, lock at 3000s
 ./install.sh --screensaver 600 --lock 0   # screensaver at 600s, never lock
