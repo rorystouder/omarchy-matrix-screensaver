@@ -62,3 +62,7 @@ Fall speed: the `speed` tuple in the `Drop` class of `bin/matrix-rain`
 ```
 
 Restores the stock `omarchy.idle` service and removes the scripts.
+
+## License
+
+[MIT](LICENSE)
