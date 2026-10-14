@@ -2,6 +2,10 @@
 
 Matrix-style digital rain as the [Omarchy](https://omarchy.org) idle screensaver.
 
+![Matrix rain screensaver demo](assets/demo.gif)
+
+<sub>Static screenshot: [assets/screenshot.png](assets/screenshot.png)</sub>
+
 - Endless green katakana/digit rain, fullscreen on every monitor
 - Any key or mouse movement dismisses it
 - Configurable idle timers, including "screensaver but never lock"
